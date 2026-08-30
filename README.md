@@ -19,7 +19,7 @@ Langgraph 기반으로 카카오톡 챗봇을 구현해보았습니다.
 
 #### 📍 추가 기능
 
-- 웹 검색 기능 수행
+- 웹 검색 기능 수행 (Tavily API)
 
 - 사용자 개인정보, 답변 선호도 저장 및 정보기반 답변 수행
 
@@ -35,7 +35,14 @@ Langgraph 기반으로 카카오톡 챗봇을 구현해보았습니다.
 
 #### 🔍 디버깅/최적화필요
 
-- 웹 검색 기능 최적화
+- 대화 이력이 프로세스 메모리(`MemorySaver`)에 저장되어 서버 재시작 시 초기화됨
+  (사용자 개인정보/선호도는 Supabase 에 저장되어 복구됨)
+
+- `user_agents` 딕셔너리가 계속 누적되어 장기 운영 시 메모리 증가
+
+- 의존성이 langchain 0.3 / langgraph 0.2 세대에 고정되어 있어 현행화 필요
+
+- 대화 이력을 Postgres 체크포인터로 옮기면 재시작에도 멀티턴이 유지됨
 
 ## Demo
 
@@ -48,49 +55,130 @@ Langgraph 기반으로 카카오톡 챗봇을 구현해보았습니다.
 
 - `configs` : 프롬프트 템플릿 저장 레포
 
-- `data` : 사용자 정보 저장 레포 (sqlite3 사용)
-
-- `modules` : 프로세스 및 데이터베이스 모듈
+- `modules` : 프로세스 및 데이터베이스 모듈 (사용자 정보는 Supabase 에 저장)
 
 - `utils` : util 함수 모음
 
 ## Getting Started
 
+### Requirements
+
+- Python 3.11 이상
+- [uv](https://docs.astral.sh/uv/) (의존성 관리)
+- OpenRouter API 키 (필수)
+- Supabase 프로젝트 (필수 — 사용자 정보 저장)
+- Tavily API 키 (선택 — 웹 검색 기능에만 필요)
+
 ### Installation
-_파이썬 프로젝트 의존성 관리와 배포를 위해 `poetry`를 사용하였습니다._
 
-1. 다운로드
-    ```bash
-    curl -sSL https://install.python-poetry.org | python3.11 -
-    ```
+_의존성 관리는 `uv` 를 사용합니다._
 
-2. 환경변수 추가
+1. uv 설치
 
     ```bash
-    export PATH="$HOME/.local/bin:$PATH"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
     ```
 
-3. 설치/버전 확인
+2. 의존성 설치 (`uv.lock` 기준으로 가상환경까지 자동 생성)
 
     ```bash
-    poetry --version
+    uv sync
     ```
 
-4. (Optional) 프로젝트별로 환경변수 폴더(.venv) 지정 
+3. **환경변수 설정**
 
     ```bash
-    poetry config virtualenvs.in-project true
+    cp .env.example .env
     ```
 
-5. 설치 (pyproject.toml을 기반)
+    | 변수 | 필수 | 설명 |
+    |---|:---:|---|
+    | `OPENROUTER_API_KEY` | ✅ | 없으면 서버가 시작되지 않습니다. |
+    | `DATABASE_URL` | ✅ | Supabase Postgres 연결 문자열. 없으면 서버가 시작되지 않습니다. |
+    | `TAVILY_API_KEY` | — | 없으면 웹 검색만 비활성화되고 나머지는 정상 동작합니다. |
+    | `WEBHOOK_URL` | — | 비워두면 루프백을 사용합니다. 보통 손댈 필요 없습니다. |
+    | `DB_SCHEMA` | — | 테이블을 격리할 스키마. 기본값 `kakao_agent`. |
+    | `LLM_MODEL` | — | OpenRouter 모델 슬러그. 기본값 `google/gemini-3-flash-preview`. |
+    | `PORT` | — | 배포 플랫폼이 자동 주입합니다. 로컬 기본값 7860. |
 
-    ```bash
-    poetry install
-    ```
-
-6. 실행
+4. 실행
 
    ```bash
-   poetry run python app.py
+   uv run python app.py
    ```
-   
+
+### 모델 (OpenRouter)
+
+LLM 호출은 [OpenRouter](https://openrouter.ai) 를 경유합니다. OpenAI 호환 API 라
+`LLM_MODEL` 환경변수만 바꾸면 다른 모델로 즉시 교체할 수 있습니다.
+
+기본 모델은 `google/gemini-3-flash-preview` 입니다.
+
+### 데이터베이스 (Supabase)
+
+사용자 개인정보와 답변 선호도는 Supabase(PostgreSQL)에 저장됩니다.
+스키마와 테이블은 서버 최초 기동 시 자동 생성되므로 별도 마이그레이션은 필요 없습니다.
+
+기존 Supabase 프로젝트를 재사용해도 됩니다. 테이블은 `public` 이 아니라
+전용 스키마(`kakao_agent.users`)에 만들어지므로 두 가지가 보장됩니다.
+
+- 기존 `public.users` 등과 이름이 충돌하지 않습니다.
+- Supabase 는 `public` 스키마만 PostgREST 로 공개하므로,
+  개인정보 테이블이 anon 키로 외부에서 조회되지 않습니다.
+
+스키마 이름은 `DB_SCHEMA` 환경변수로 바꿀 수 있습니다.
+
+1. [Supabase](https://supabase.com) 에서 프로젝트를 생성합니다.
+2. **Project Settings → Database → Connection string → Transaction pooler** 의 URI 를 복사합니다.
+   (포트 `6543` 짜리를 쓰세요. 직결 주소는 IPv6 문제가 생길 수 있습니다.)
+3. 비밀번호를 채워 `.env` 의 `DATABASE_URL` 에 넣습니다.
+
+> ℹ️ 무료 플랜은 **7일간 쿼리가 없으면 프로젝트가 자동 일시정지**됩니다.
+> 앱이 12시간마다 keepalive 쿼리를 보내 이를 방지하므로, 서버가 떠 있는 한 멈추지 않습니다.
+
+## Deployment (Railway)
+
+카카오 서버가 호출할 수 있는 공개 HTTPS 주소가 필요합니다.
+`Dockerfile` 과 `railway.json` 이 포함되어 있어 저장소만 연결하면 배포됩니다.
+
+1. [Railway](https://railway.app) 에서 **New Project → Deploy from GitHub repo** 로 이 저장소를 선택합니다.
+
+2. **Variables** 탭에서 환경변수를 등록합니다. (`PORT` 는 Railway 가 자동 주입하므로 넣지 마세요)
+
+    ```
+    OPENROUTER_API_KEY=sk-or-v1-...
+    DATABASE_URL=postgresql://...
+    TAVILY_API_KEY=tvly-...
+    ```
+
+3. **Settings → Networking → Generate Domain** 으로 공개 도메인을 발급받습니다.
+   (`https://<프로젝트명>.up.railway.app`)
+
+4. 배포 확인
+
+    ```bash
+    curl https://<발급받은-도메인>/health
+    # {"status":"ok"}
+    ```
+
+### 카카오톡 채널 연결
+
+1. [챗봇 관리자센터](https://chatbot.kakao.com) 에서 스킬을 만들고, URL 에
+   `https://<발급받은-도메인>/question` 을 등록합니다.
+
+2. 해당 블록의 **콜백 사용** 옵션을 켭니다.
+
+> ⚠️ 콜백을 켜지 않으면 `callbackUrl` 이 전달되지 않아 답변이 오지 않습니다.
+> 카카오는 스킬 서버가 **5초 안에** 1차 응답을 주지 않으면 연결을 끊고,
+> 발급된 콜백 URL 은 **1분간 1회만** 유효합니다.
+
+## Troubleshooting
+
+| 증상 | 원인 / 조치 |
+|---|---|
+| 시작 시 `OPENROUTER_API_KEY 가 설정되지 않았습니다` | `.env` 파일이 없습니다. `cp .env.example .env` 후 키 입력 |
+| 시작 시 `DATABASE_URL 가 설정되지 않았습니다` | Supabase 연결 문자열 미설정 |
+| DB 연결 타임아웃 | Supabase 프로젝트가 일시정지됐을 수 있습니다. 대시보드에서 Restore 하세요. |
+| 카톡에서 답이 아예 안 옴 | 오픈빌더의 스킬 URL 이 옛날 주소이거나 서버가 내려갔습니다. `/health` 로 확인하세요. |
+| `callbackUrl 이 없습니다` 로그 | 오픈빌더에서 해당 블록의 콜백 옵션이 꺼져 있습니다. |
+| 검색 기능만 동작하지 않음 | `TAVILY_API_KEY` 미설정. 없으면 검색 없이 답변합니다. |
