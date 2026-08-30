@@ -6,13 +6,12 @@ readme = "README.md"
 authors = [{ name = "ccw7463" }]
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.58.1",
     "python-dotenv>=1.0.1",
-    "loguru>=0.7.3",
     "fastapi>=0.115.6",
     "uvicorn>=0.34.0",
-    "langchain-openai>=0.2.14",
-    "langgraph>=0.2.60",
+    "langchain-core>=1.6.0",
+    "langchain-openai>=1.6.0",
+    "langgraph>=1.2.11",
     "ml-collections>=1.0.0",
     "tavily-python>=0.8.0",
     "httpx>=0.27.0",

@@ -35,10 +35,11 @@ Langgraph 기반으로 카카오톡 챗봇을 구현해보았습니다.
 
 #### 🔍 디버깅/최적화필요
 
+- `railway.json` (Config as Code) 은 2026-12-01 까지만 지원되므로
+  이후 `.railway/railway.ts` (IaC) 로 이전 필요
+
 - 대화 이력이 프로세스 메모리(`MemorySaver`)에 저장되어 서버 재시작 시 초기화됨
   (사용자 개인정보/선호도는 Supabase 에 저장되어 복구됨)
-
-- 의존성이 langchain 0.3 / langgraph 0.2 세대에 고정되어 있어 현행화 필요
 
 - 대화 이력을 Postgres 체크포인터로 옮기면 재시작에도 멀티턴이 유지됨
 
