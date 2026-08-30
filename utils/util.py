@@ -60,7 +60,13 @@ def is_search_available() -> bool:
     return bool(os.getenv("TAVILY_API_KEY"))
 
 
-def web_search(search_term: str, SEARCH_RESULT_COUNT: int = 5) -> list[dict]:
+# Tavily 가 받는 시간 범위. any 는 필터를 걸지 않는다는 뜻이다.
+SEARCH_TIME_RANGES = ("day", "week", "month", "year")
+
+
+def web_search(
+    search_term: str, SEARCH_RESULT_COUNT: int = 5, time_range: str | None = None
+) -> list[dict]:
     """
     Des:
         Tavily API 기반 웹 검색 함수
@@ -69,6 +75,7 @@ def web_search(search_term: str, SEARCH_RESULT_COUNT: int = 5) -> list[dict]:
     Args:
         search_term (str): 검색할 키워드
         SEARCH_RESULT_COUNT (int): 검색 결과 수
+        time_range (str | None): day/week/month/year 중 하나. 없으면 필터를 걸지 않는다.
     Returns:
         list[dict]: {"title", "link", "content"} 형태의 검색 결과 리스트
     """
@@ -79,15 +86,20 @@ def web_search(search_term: str, SEARCH_RESULT_COUNT: int = 5) -> list[dict]:
     if _tavily_client is None:
         _tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
+    params = {
+        "query": search_term,
+        "max_results": SEARCH_RESULT_COUNT,
+        "search_depth": "advanced",
+        "include_raw_content": "text",
+        "country": "south korea",
+        "timeout": 30,
+    }
+    # 시간 필터가 없으면 몇 년 지난 페이지가 상위에 올라와 답변이 낡는다.
+    if time_range in SEARCH_TIME_RANGES:
+        params["time_range"] = time_range
+
     try:
-        response = _tavily_client.search(
-            query=search_term,
-            max_results=SEARCH_RESULT_COUNT,
-            search_depth="advanced",
-            include_raw_content="text",
-            country="south korea",
-            timeout=30,
-        )
+        response = _tavily_client.search(**params)
     except Exception as e:
         print(f"{RED}[util.py] 검색 실패: {type(e).__name__}: {e}{RESET}")
         return []
