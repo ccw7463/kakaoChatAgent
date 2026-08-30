@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 
 from . import *
-from utils.util import web_search, is_search_available, embed_texts
+from utils.util import web_search, is_search_available, embed_texts, REFERENCE_MARKER
 from modules.db import UserData
 
 # OpenRouter 는 OpenAI 호환 API 이므로 ChatOpenAI 에 base_url 만 바꿔 끼우면 된다.
@@ -418,7 +418,7 @@ class ChatbotAgent:
                 f"제목 : {title}\n링크 : {link}\n내용 : {result['content']}\n\n"
             )
             suffix_context += f"""
-📌 참고내용 [{idx}]
+{REFERENCE_MARKER} [{idx}]
 제목 : {title}
 링크 : {link}
 """
