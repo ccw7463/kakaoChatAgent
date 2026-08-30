@@ -1,41 +1,30 @@
-[tool.poetry]
+[project]
 name = "kakaochatbot"
 version = "0.1.0"
-description = ""
-authors = ["ccw7463 <ccw7463@example.com>"]
+description = "Langgraph 기반 카카오톡 채널 챗봇 에이전트"
 readme = "README.md"
-
-# 포함할 패키지 지정
-packages = [
-    { include = "utils" },
-    { include = "configs" },
-    { include = "modules" },
-    { include = "data" },
-    { include = "public" },
+authors = [{ name = "ccw7463" }]
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.58.1",
+    "python-dotenv>=1.0.1",
+    "loguru>=0.7.3",
+    "fastapi>=0.115.6",
+    "uvicorn>=0.34.0",
+    "langchain-openai>=0.2.14",
+    "langgraph>=0.2.60",
+    "ml-collections>=1.0.0",
+    "tavily-python>=0.8.0",
+    "httpx>=0.27.0",
+    "psycopg[binary,pool]>=3.2.0",
 ]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-ipykernel = "^6.29.5"
-openai = "^1.58.1"
-python-dotenv = "^1.0.1"
-loguru = "^0.7.3"
-fastapi = "^0.115.6"
-uvicorn = "^0.34.0"
-langchain-openai = "^0.2.14"
-langgraph = "^0.2.60"
-bs4 = "^0.0.2"
-ml-collections = "^1.0.0"
-langchain-community = "^0.3.14"
-html2text = "^2024.2.26"
-selenium = "^4.27.1"
-webdriver-manager = "^4.0.2"
-playwright = "^1.49.1"
+[dependency-groups]
+dev = [
+    "black>=24.10.0",
+    "ipykernel>=6.29.5",
+]
 
-
-[tool.poetry.group.dev.dependencies]
-black = "^24.10.0"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+# 라이브러리가 아닌 애플리케이션이므로 패키지로 빌드하지 않는다.
+[tool.uv]
+package = false
