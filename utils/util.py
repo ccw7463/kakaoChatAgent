@@ -9,8 +9,10 @@ GREEN = "\033[92m"  # Bright Green
 YELLOW = "\033[93m"  # Bright Yellow
 PINK = "\033[95m"  # Bright Pink
 
-# LLM 컨텍스트 초과를 막기 위한 문서당 본문 길이 상한
-MAX_CONTENT_LENGTH = 4000
+# 문서당 본문 길이 상한.
+# 답변은 카카오 말풍선 크기에 맞춰 짧게 나가므로 컨텍스트를 크게 넣을 이유가 없다.
+# 크게 넣으면 최종 답변 생성만 느려진다. (16K -> 4.5K 로 줄여 측정)
+MAX_CONTENT_LENGTH = 1500
 
 _tavily_client = None
 
