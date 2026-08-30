@@ -5,7 +5,7 @@ from modules.agent import ChatbotAgent
 from modules.db import UserData
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
-from utils.util import GREEN, RED, YELLOW, RESET
+from utils.util import GREEN, RED, YELLOW, RESET, REFERENCE_MARKER
 import asyncio
 import os
 import uvicorn
@@ -88,28 +88,26 @@ KAKAO_TEXT_LIMIT = 1000
 KAKAO_MAX_OUTPUTS = 3
 
 
-def build_kakao_outputs(text: str) -> list[dict]:
+def _split_plain(text: str, max_chunks: int) -> tuple[list[str], str]:
     """
     Des:
-        답변을 카카오 응답 형식(simpleText 목록)으로 변환하는 함수
-            - 말풍선당 1,000자, 최대 3개까지만 허용된다.
-            - 문단 -> 문장 순으로 경계를 찾아 나누고, 그래도 넘치면 잘라낸다.
+        일반 문장을 말풍선 크기로 나누는 함수
+            - 문단 -> 문장 -> 공백 순으로 자연스러운 경계를 찾는다.
     Args:
-        text: 보낼 답변 전문
+        text: 나눌 문장
+        max_chunks: 최대 말풍선 수
     Returns:
-        list[dict]: simpleText output 목록 (1~3개)
+        tuple[list[str], str]: (나눈 조각들, 담지 못하고 남은 문자열)
     """
     chunks: list[str] = []
     remaining = text.strip()
 
-    while remaining and len(chunks) < KAKAO_MAX_OUTPUTS:
+    while remaining and len(chunks) < max_chunks:
         if len(remaining) <= KAKAO_TEXT_LIMIT:
             chunks.append(remaining)
-            remaining = ""
-            break
+            return chunks, ""
 
         window = remaining[:KAKAO_TEXT_LIMIT]
-        # 문단 -> 문장 -> 공백 순으로 자연스러운 경계를 찾는다.
         cut = max(window.rfind("\n\n"), window.rfind("\n"))
         if cut < KAKAO_TEXT_LIMIT // 2:
             cut = max(window.rfind(". "), window.rfind("다. "), window.rfind("요. "))
@@ -123,15 +121,70 @@ def build_kakao_outputs(text: str) -> list[dict]:
         chunks.append(remaining[:cut].strip())
         remaining = remaining[cut:].strip()
 
-    # 3개를 다 쓰고도 남으면 마지막 말풍선 끝을 줄임표로 대체한다.
-    if remaining and chunks:
+    return chunks, remaining
+
+
+def _pack_references(refs: str) -> list[str]:
+    """
+    Des:
+        참고내용 목록을 말풍선에 담는 함수
+            - 출처 하나가 말풍선 경계에 걸려 제목과 링크가 찢어지면 안 되므로
+              블록 단위로만 나눈다.
+    Args:
+        refs: 참고내용 전문
+    Returns:
+        list[str]: 말풍선별 참고내용
+    """
+    blocks = [REFERENCE_MARKER + b for b in refs.split(REFERENCE_MARKER) if b.strip()]
+    chunks: list[str] = []
+    for block in blocks:
+        block = block.strip()
+        if chunks and len(chunks[-1]) + 2 + len(block) <= KAKAO_TEXT_LIMIT:
+            chunks[-1] += "\n\n" + block
+        else:
+            chunks.append(block[:KAKAO_TEXT_LIMIT])
+    return chunks
+
+
+def build_kakao_outputs(text: str) -> list[dict]:
+    """
+    Des:
+        답변을 카카오 응답 형식(simpleText 목록)으로 변환하는 함수
+            - 말풍선당 1,000자, 최대 3개까지만 허용된다.
+            - 본문과 참고내용을 먼저 갈라서, 출처 목록이 여러 말풍선에
+              흩어지지 않게 한다. (예전에는 글자 수만 보고 잘라
+              참고내용 1,2 는 앞 말풍선, 3 만 뒤 말풍선으로 떨어졌다)
+    Args:
+        text: 보낼 답변 전문
+    Returns:
+        list[dict]: simpleText output 목록 (1~3개)
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= KAKAO_TEXT_LIMIT:
+        return [{"simpleText": {"text": text}}]
+
+    marker_at = text.find(REFERENCE_MARKER)
+    if marker_at == -1:
+        body, refs = text, ""
+    else:
+        body, refs = text[:marker_at].rstrip(), text[marker_at:].strip()
+
+    # 참고내용 몫을 먼저 확보한다. 본문이 길다고 출처가 통째로 사라지면 곤란하다.
+    ref_chunks = _pack_references(refs)[: KAKAO_MAX_OUTPUTS - 1] if refs else []
+    body_chunks, leftover = _split_plain(body, KAKAO_MAX_OUTPUTS - len(ref_chunks))
+
+    if leftover and body_chunks:
         tail = "\n\n(내용이 길어 일부만 표시했어요)"
-        last = chunks[-1]
+        last = body_chunks[-1]
         if len(last) + len(tail) > KAKAO_TEXT_LIMIT:
             last = last[: KAKAO_TEXT_LIMIT - len(tail)]
-        chunks[-1] = last + tail
+        body_chunks[-1] = last + tail
 
-    return [{"simpleText": {"text": c}} for c in chunks if c]
+    return [
+        {"simpleText": {"text": c}} for c in (body_chunks + ref_chunks) if c.strip()
+    ]
 
 
 # 답변 생성이 실패했을 때 사용자에게 보낼 메시지
