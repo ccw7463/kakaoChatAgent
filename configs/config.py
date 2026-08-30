@@ -121,8 +121,16 @@ prompt_config.answer_prompt = """당신은 사용자 요청에 대해 답변을 
 
 [사용자 답변 선호도]:
 {preference}
-
+{recalled}
 답변:"""
+
+prompt_config.recalled_prompt = """
+[이전에 나눈 관련 대화]:
+{recalled}
+
+위 대화는 참고용입니다. 사용자가 명시적으로 묻지 않으면 굳이 언급하지 마세요.
+현재 요청과 관계가 없다면 무시하세요.
+"""
 
 prompt_config.answer_with_context = """[참고내용]을 참고해서 [사용자 요청문]에 대한 답변을 생성하세요. 만약 참고내용이 없다면, 당신이 아는 내용을 답변하세요.
 

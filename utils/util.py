@@ -1,4 +1,6 @@
 import os
+
+import httpx
 from dotenv import load_dotenv
 from tavily import TavilyClient
 
@@ -13,6 +15,12 @@ PINK = "\033[95m"  # Bright Pink
 # 답변은 카카오 말풍선 크기에 맞춰 짧게 나가므로 컨텍스트를 크게 넣을 이유가 없다.
 # 크게 넣으면 최종 답변 생성만 느려진다. (16K -> 4.5K 로 줄여 측정)
 MAX_CONTENT_LENGTH = 1500
+
+# 임베딩 설정 (OpenRouter 의 OpenAI 호환 /embeddings 사용)
+EMBED_MODEL = os.getenv("EMBED_MODEL", "google/gemini-embedding-001")
+EMBED_DIM = 3072
+# 임베딩 입력 토큰 상한을 넘지 않도록 보수적으로 자른다.
+EMBED_INPUT_LIMIT = 2000
 
 _tavily_client = None
 
@@ -93,3 +101,37 @@ def web_search(search_term: str, SEARCH_RESULT_COUNT: int = 5) -> list[dict]:
             }
         )
     return results
+
+
+def embed_texts(texts: list[str]) -> list[list[float]] | None:
+    """
+    Des:
+        문장들을 임베딩 벡터로 변환하는 함수
+            - langchain 의 OpenAIEmbeddings 대신 httpx 로 직접 호출한다.
+              (tiktoken 기반 사전 절단이 한국어에서 엉뚱한 자리를 끊고,
+               응답의 usage/비용 정보도 버려지기 때문)
+            - 실패 시 예외를 던지지 않고 None 을 반환한다. (호출측에서 회상 없이 진행)
+    Args:
+        texts: 임베딩할 문장 목록
+    Returns:
+        list[list[float]] | None: 입력 순서와 같은 벡터 목록. 실패 시 None
+    """
+    if not texts:
+        return []
+
+    payload = [t[:EMBED_INPUT_LIMIT] for t in texts]
+    try:
+        res = httpx.post(
+            "https://openrouter.ai/api/v1/embeddings",
+            headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"},
+            json={"model": EMBED_MODEL, "input": payload},
+            timeout=30,
+        )
+        res.raise_for_status()
+        data = res.json()["data"]
+    except Exception as e:
+        print(f"{RED}[util.py] 임베딩 실패: {type(e).__name__}: {e}{RESET}")
+        return None
+
+    # API 가 순서를 보장하지 않을 수 있으므로 index 로 정렬한다.
+    return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
