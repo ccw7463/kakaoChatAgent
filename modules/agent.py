@@ -34,7 +34,6 @@ class ChatbotAgent:
     def __init__(self):
         self.LIMIT_LENGTH = 12
         self.SEARCH_RESULT_COUNT = 3
-        self.system_prompt = prompt_config.system_message
         self.llm = ChatOpenAI(
             model=LLM_MODEL,
             base_url=OPENROUTER_BASE_URL,
@@ -319,16 +318,15 @@ class ChatbotAgent:
         """
         user_id = config["configurable"]["user_id"]
         namespace = ("memories", user_id)
-        personal_memory = self._get_memory(
-            namespace=namespace, key="personal_info", store=store
-        )
-        personal_preference = self._get_memory(
-            namespace=namespace, key="personal_preference", store=store
-        )
 
-        recalled = state.get("recalled") or ""
-        recalled_block = (
-            prompt_config.recalled_prompt.format(recalled=recalled) if recalled else ""
+        system_message = self._build_system_message(
+            personal_memory=self._get_memory(
+                namespace=namespace, key="personal_info", store=store
+            ),
+            personal_preference=self._get_memory(
+                namespace=namespace, key="personal_preference", store=store
+            ),
+            recalled=state.get("recalled") or "",
         )
 
         if state.get("is_search") == "YES":
@@ -338,38 +336,51 @@ class ChatbotAgent:
             suffix_context = self._get_memory(
                 namespace=namespace, key="suffix_context", store=store
             )
-            system_message = prompt_config.answer_prompt.format(
-                memory=personal_memory,
-                preference=personal_preference,
-                recalled=recalled_block,
-            )
             user_prompt = prompt_config.answer_with_context.format(
                 context=main_context, query=state["messages"][-1].content
-            )  # TODO 향후 고려필요
+            )
             prompt = (
-                [SystemMessage(content=self.system_prompt + system_message)]
+                [SystemMessage(content=system_message)]
                 + state["messages"][:-1]
                 + [HumanMessage(content=user_prompt)]
-            )  # TODO 향후 고려필요
-            print(f"{BLUE}Answer with Search prompt : {prompt[0].content}{RESET}")
+            )
             response = self.llm.invoke(prompt).content
             return {
                 "messages": AIMessage(
                     content=self._postprocess(response) + "\n" + suffix_context
                 )
             }
-        else:
-            system_message = prompt_config.answer_prompt.format(
-                memory=personal_memory,
-                preference=personal_preference,
-                recalled=recalled_block,
+
+        prompt = [SystemMessage(content=system_message)] + state["messages"]
+        response = self.llm.invoke(prompt).content
+        return {"messages": AIMessage(content=self._postprocess(response))}
+
+    @staticmethod
+    def _build_system_message(
+        personal_memory: str, personal_preference: str, recalled: str
+    ) -> str:
+        """
+        Des:
+            시스템 메시지를 조립하는 함수
+                - 개인화 블록은 내용이 있을 때만 붙인다.
+                  비어 있는데도 헤더를 넣으면 토큰만 쓰고 모델을 헷갈리게 한다.
+        Args:
+            personal_memory: 저장된 사용자 정보
+            personal_preference: 저장된 답변 선호도
+            recalled: 회상한 과거 대화
+        Returns:
+            str: 최종 시스템 메시지
+        """
+        blocks = [prompt_config.system_message]
+        if personal_memory.strip():
+            blocks.append(prompt_config.memory_block.format(memory=personal_memory))
+        if personal_preference.strip():
+            blocks.append(
+                prompt_config.preference_block.format(preference=personal_preference)
             )
-            prompt = [
-                SystemMessage(content=self.system_prompt + system_message)
-            ] + state["messages"]
-            print(f"{BLUE}Answer prompt : {prompt[0].content}{RESET}")
-            response = self.llm.invoke(prompt).content
-            return {"messages": AIMessage(content=self._postprocess(response))}
+        if recalled.strip():
+            blocks.append(prompt_config.recalled_block.format(recalled=recalled))
+        return "\n\n".join(blocks)
 
     def _node_optimize_memory(self, state: State):
         """
