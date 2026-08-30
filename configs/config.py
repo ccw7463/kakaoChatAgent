@@ -1,5 +1,5 @@
-from datetime import datetime
 from ml_collections import ConfigDict
+
 prompt_config = ConfigDict()
 prompt_config.system_message = """당신의 이름은 '미네르바'이고 카카오톡에서 활동하는 챗봇입니다. 'ccw'님에 의해 개발되었습니다.
 
@@ -35,7 +35,7 @@ prompt_config.decide_preference_prompt = """현재 사용자 요청문에 대해
 답변은 무조건 YES 또는 NO로 출력하세요."""
 
 #### 저장 프롬프트
-prompt_config.create_memory_prompt ="""당신은 사용자의 응답을 개인화하기 위해 사용자에 대한 정보를 수집하고 있습니다.
+prompt_config.create_memory_prompt = """당신은 사용자의 응답을 개인화하기 위해 사용자에 대한 정보를 수집하고 있습니다.
 
 [현재 사용자 정보]:
 {memory}
@@ -68,7 +68,7 @@ prompt_config.create_memory_prompt ="""당신은 사용자의 응답을 개인�
 ...
 """
 
-prompt_config.create_preference_prompt ="""당신은 사용자의 응답을 개인화하기 위해 사용자의 답변 선호도를 수집하고 있습니다.
+prompt_config.create_preference_prompt = """당신은 사용자의 응답을 개인화하기 위해 사용자의 답변 선호도를 수집하고 있습니다.
 
 [현재 사용자 답변 선호도]:
 {preference}
@@ -126,17 +126,17 @@ prompt_config.answer_with_context = """[참고내용]을 참고해서 [사용자
 답변 : """
 
 #### 웹 검색 관련 프롬프트
-prompt_config.generate_search_keyword = f"""다음 사용자 요청문을 기반으로 웹에서 자료 검색을 하려고한다.
+prompt_config.generate_search_keyword = """다음 사용자 요청문을 기반으로 웹에서 자료 검색을 하려고한다.
 
 지침:
 1. 오늘 날짜를 참고해서 검색어를 생성하라.
 2. 검색어는 반드시 한국어로 작성한다.
-3. 오늘 날짜 : {datetime.now().strftime("%Y-%m-%d")}
+3. 오늘 날짜 : {today}
 
 이전 검색어:
-{{previous_search_keyword}}
+{previous_search_keyword}
 
 사용자 요청문: 
-{{query}}
+{query}
 
 검색어:"""

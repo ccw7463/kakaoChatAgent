@@ -1,11 +1,22 @@
+import asyncio
+import os
+import re
+from datetime import datetime
+
 from . import *
-from utils.util import google_search_scrape, extract_content
+from utils.util import web_search, is_search_available
 from modules.db import UserData
+
+# OpenRouter 는 OpenAI 호환 API 이므로 ChatOpenAI 에 base_url 만 바꿔 끼우면 된다.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+LLM_MODEL = os.getenv("LLM_MODEL", "google/gemini-3-flash-preview")
+
 
 class State(MessagesState):
     is_search: str
     is_personal: str
     is_preference: str
+
 
 class ChatbotAgent:
     def __init__(self):
@@ -13,7 +24,13 @@ class ChatbotAgent:
         self.SEARCH_RESULT_COUNT = 5
         self.system_prompt = prompt_config.system_message
         self.search_keyword = ""
-        self.llm = ChatOpenAI(model="gpt-4o")
+        self.llm = ChatOpenAI(
+            model=LLM_MODEL,
+            base_url=OPENROUTER_BASE_URL,
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            # OpenRouter 대시보드에서 어떤 앱이 호출했는지 구분하기 위한 선택 헤더
+            default_headers={"X-Title": "kakao-chat-agent"},
+        )
         self.config = {"configurable": {"thread_id": "default", "user_id": "default"}}
         self.user_data = UserData()
         self._build_graph()
@@ -28,7 +45,10 @@ class ChatbotAgent:
             답변
         """
         question = HumanMessage(content=question)
-        return self._call_graph([question])["messages"][-1].content
+        # 그래프는 동기 실행이므로 별도 스레드로 넘겨 이벤트 루프를 막지 않는다.
+        # (블로킹 시 다른 사용자의 요청이 카카오 5초 제한을 넘겨 끊긴다)
+        result = await asyncio.to_thread(self._call_graph, [question])
+        return result["messages"][-1].content
 
     def set_config(self, user_id: str):
         """
@@ -130,7 +150,7 @@ class ChatbotAgent:
         prompt = [SystemMessage(content=prompt_config.decide_personal_prompt)] + [
             HumanMessage(content=self.previous_human_messages_query)
         ]
-        return {"is_personal": [self.llm.invoke(prompt)][0].content.upper()}
+        return {"is_personal": self._parse_yes_no(self.llm.invoke(prompt).content)}
 
     def _node_decide_preference(self, state: State):
         """
@@ -140,17 +160,20 @@ class ChatbotAgent:
         prompt = [SystemMessage(content=prompt_config.decide_preference_prompt)] + [
             HumanMessage(content=self.previous_human_messages_query)
         ]
-        return {"is_preference": [self.llm.invoke(prompt)][0].content.upper()}
+        return {"is_preference": self._parse_yes_no(self.llm.invoke(prompt).content)}
 
     def _node_decide_search(self, state: State):
         """
         Des:
             사용자 요청에 검색 여부를 결정하는 노드
+                - 검색 API 키가 없으면 LLM 호출 없이 바로 NO 로 처리한다.
         """
+        if not is_search_available():
+            return {"is_search": "NO"}
         prompt = [SystemMessage(content=prompt_config.decide_search_prompt)] + [
             HumanMessage(content=self.previous_human_messages_query)
         ]
-        return {"is_search": [self.llm.invoke(prompt)][0].content.upper()}
+        return {"is_search": self._parse_yes_no(self.llm.invoke(prompt).content)}
 
     def _node_write_memory(
         self, state: State, config: RunnableConfig, store: BaseStore
@@ -194,6 +217,12 @@ class ChatbotAgent:
 
         if state.get("is_search") == "YES":
             main_context, suffix_context = self._web_search()
+            if not main_context:
+                # 검색 결과가 없으면 검색 없이 답변하도록 되돌린다.
+                print(
+                    f"{YELLOW}[agent.py] 검색 결과가 없어 일반 답변으로 전환합니다.{RESET}"
+                )
+                return {"is_search": "NO"}
             store.put(
                 namespace=namespace, key="main_context", value={"memory": main_context}
             )
@@ -271,13 +300,16 @@ class ChatbotAgent:
         """
         Des:
             웹 검색 함수
+                - Tavily API 가 검색과 본문 추출을 함께 처리한다.
+                - 검색 결과가 없으면 빈 컨텍스트를 반환하며, 호출측에서 검색 없이 답변한다.
         """
         prompt = prompt_config.generate_search_keyword.format(
             query=self.previous_human_messages_query,
             previous_search_keyword=self.search_keyword,
+            today=datetime.now().strftime("%Y-%m-%d"),
         )
         self.search_keyword = self.llm.invoke(prompt).content
-        results = google_search_scrape(
+        results = web_search(
             self.search_keyword, SEARCH_RESULT_COUNT=self.SEARCH_RESULT_COUNT
         )
         print(
@@ -285,27 +317,33 @@ class ChatbotAgent:
         )
         main_context = ""
         suffix_context = ""
-        for idx, result in enumerate(results):
-            title = result.get('title')
-            link = result.get("link")
-            try:
-                desc, detailed_content = extract_content(link)
-            except:
-                pass
-            try:
-                if (
-                    "Enable JavaScript and cookies" in detailed_content
-                ):  # TODO 동적페이지 처리방식 필요
-                    continue
-            except:
-                continue
-            main_context += f"제목 : {title}\n링크 : {link}\n설명 : {desc}\n내용 : {detailed_content}\n\n"
+        for idx, result in enumerate(results, start=1):
+            title = result["title"]
+            link = result["link"]
+            main_context += (
+                f"제목 : {title}\n링크 : {link}\n내용 : {result['content']}\n\n"
+            )
             suffix_context += f"""
-📌 참고내용 [{idx+1}]
+📌 참고내용 [{idx}]
 제목 : {title}
 링크 : {link}
 """
         return main_context, suffix_context
+
+    @staticmethod
+    def _parse_yes_no(content: str) -> str:
+        """
+        Des:
+            라우팅 노드의 응답을 YES / NO 로 정규화하는 함수
+                - 모델에 따라 'YES.', '**YES**', 'Yes, 필요합니다' 처럼 답하므로
+                  알파벳만 남긴 뒤 YES 로 시작하는지만 본다.
+        Args:
+            content: LLM 원본 응답
+        Returns:
+            str: "YES" 또는 "NO"
+        """
+        letters = re.sub(r"[^A-Z]", "", content.upper())
+        return "YES" if letters.startswith("YES") else "NO"
 
     def _get_memory(self, namespace, key, store: BaseStore):
         """
