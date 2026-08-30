@@ -1,0 +1,9 @@
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.env
+public
+*.png
+README.md
