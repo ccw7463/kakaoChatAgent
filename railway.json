@@ -8,5 +8,6 @@
     "healthcheckPath": "/health",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
-  }
+  },
+  "//": "Config as Code 는 2026-12-01 까지 유효. 이후 .railway/railway.ts (IaC) 로 이전 필요 — railway config migrate --apply + npm install railway"
 }
