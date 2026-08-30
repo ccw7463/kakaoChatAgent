@@ -141,6 +141,9 @@ LLM 호출은 [OpenRouter](https://openrouter.ai) 를 경유합니다. OpenAI �
 카카오 서버가 호출할 수 있는 공개 HTTPS 주소가 필요합니다.
 `Dockerfile` 과 `railway.json` 이 포함되어 있어 저장소만 연결하면 배포됩니다.
 
+현재 `main` 브랜치는 Railway 에 연결되어 있어 **푸시하면 자동 배포**됩니다.
+서비스는 카카오/Supabase(서울) 와의 지연을 줄이기 위해 **Southeast Asia** 리전에 있습니다.
+
 1. [Railway](https://railway.app) 에서 **New Project → Deploy from GitHub repo** 로 이 저장소를 선택합니다.
 
 2. **Variables** 탭에서 환경변수를 등록합니다. (`PORT` 는 Railway 가 자동 주입하므로 넣지 마세요)
@@ -159,6 +162,12 @@ LLM 호출은 [OpenRouter](https://openrouter.ai) 를 경유합니다. OpenAI �
     ```bash
     curl https://<발급받은-도메인>/health
     # {"status":"ok"}
+    ```
+
+5. (권장) 리전을 서울과 가까운 곳으로 옮깁니다.
+
+    ```bash
+    railway service scale --service <서비스명> southeast-asia=1 us-west=0
     ```
 
 ### 카카오톡 채널 연결
