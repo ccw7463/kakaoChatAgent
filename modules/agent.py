@@ -4,7 +4,13 @@ import re
 from datetime import datetime
 
 from . import *
-from utils.util import web_search, is_search_available, embed_texts, REFERENCE_MARKER
+from utils.util import (
+    web_search,
+    is_search_available,
+    embed_texts,
+    REFERENCE_MARKER,
+    SEARCH_TIME_RANGES,
+)
 from modules.db import UserData
 
 # OpenRouter 는 OpenAI 호환 API 이므로 ChatOpenAI 에 base_url 만 바꿔 끼우면 된다.
@@ -27,6 +33,7 @@ class State(MessagesState):
     is_personal: str
     is_preference: str
     search_keyword: str
+    search_time_range: str
     recalled: str
 
 
@@ -248,8 +255,16 @@ class ChatbotAgent:
 
         # 알파벳만 남겼을 때 NO 면 검색 불필요, 그 외에는 내용을 검색어로 본다.
         if not content or re.sub(r"[^A-Z]", "", content.upper()) == "NO":
-            return {"is_search": "NO", "search_keyword": ""}
-        return {"is_search": "YES", "search_keyword": content.splitlines()[0].strip()}
+            return {"is_search": "NO", "search_keyword": "", "search_time_range": ""}
+
+        # "검색어 | 기간" 형식. 기간이 없거나 이상하면 필터 없이 검색한다.
+        keyword, _, raw_range = content.splitlines()[0].partition("|")
+        time_range = raw_range.strip().lower()
+        return {
+            "is_search": "YES",
+            "search_keyword": keyword.strip(),
+            "search_time_range": time_range if time_range in SEARCH_TIME_RANGES else "",
+        }
 
     def _node_recall(self, state: State, config: RunnableConfig):
         """
@@ -297,7 +312,9 @@ class ChatbotAgent:
 
         user_id = config["configurable"]["user_id"]
         namespace = ("memories", user_id)
-        main_context, suffix_context = self._web_search(state.get("search_keyword", ""))
+        main_context, suffix_context = self._web_search(
+            state.get("search_keyword", ""), state.get("search_time_range", "")
+        )
         if not main_context:
             # 검색 결과가 없으면 검색 없이 답변하도록 되돌린다.
             print(
@@ -337,7 +354,9 @@ class ChatbotAgent:
                 namespace=namespace, key="suffix_context", store=store
             )
             user_prompt = prompt_config.answer_with_context.format(
-                context=main_context, query=state["messages"][-1].content
+                context=main_context,
+                query=state["messages"][-1].content,
+                today=datetime.now().strftime("%Y년 %m월 %d일"),
             )
             prompt = (
                 [SystemMessage(content=system_message)]
@@ -371,7 +390,11 @@ class ChatbotAgent:
         Returns:
             str: 최종 시스템 메시지
         """
-        blocks = [prompt_config.system_message]
+        blocks = [
+            prompt_config.system_message.format(
+                today=datetime.now().strftime("%Y년 %m월 %d일")
+            )
+        ]
         if personal_memory.strip():
             blocks.append(prompt_config.memory_block.format(memory=personal_memory))
         if personal_preference.strip():
@@ -396,7 +419,7 @@ class ChatbotAgent:
         else:
             return {"messages": state["messages"]}
 
-    def _web_search(self, search_keyword: str):
+    def _web_search(self, search_keyword: str, time_range: str = ""):
         """
         Des:
             웹 검색 함수
@@ -404,11 +427,17 @@ class ChatbotAgent:
                 - 검색 결과가 없으면 빈 컨텍스트를 반환하며, 호출측에서 검색 없이 답변한다.
         Args:
             search_keyword: 검색할 키워드
+            time_range: 자료의 최신성 범위 (day/week/month/year). 빈 값이면 필터 없음
         """
         results = web_search(
-            search_keyword, SEARCH_RESULT_COUNT=self.SEARCH_RESULT_COUNT
+            search_keyword,
+            SEARCH_RESULT_COUNT=self.SEARCH_RESULT_COUNT,
+            time_range=time_range or None,
         )
-        print(f"{RED}검색어 : {search_keyword}\n검색결과 : {len(results)}\n{RESET}")
+        print(
+            f"{RED}검색어 : {search_keyword} (기간 {time_range or '제한없음'})"
+            f"\n검색결과 : {len(results)}\n{RESET}"
+        )
         main_context = ""
         suffix_context = ""
         for idx, result in enumerate(results, start=1):
