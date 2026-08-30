@@ -16,14 +16,14 @@ class State(MessagesState):
     is_search: str
     is_personal: str
     is_preference: str
+    search_keyword: str
 
 
 class ChatbotAgent:
     def __init__(self):
         self.LIMIT_LENGTH = 12
-        self.SEARCH_RESULT_COUNT = 5
+        self.SEARCH_RESULT_COUNT = 3
         self.system_prompt = prompt_config.system_message
-        self.search_keyword = ""
         self.llm = ChatOpenAI(
             model=LLM_MODEL,
             base_url=OPENROUTER_BASE_URL,
@@ -50,6 +50,49 @@ class ChatbotAgent:
         result = await asyncio.to_thread(self._call_graph, [question])
         return result["messages"][-1].content
 
+    async def update_memory(self):
+        """
+        Des:
+            개인정보/선호도를 갱신하는 함수
+                - 답변을 사용자에게 보낸 뒤에 호출한다.
+                  이 결과는 다음 턴부터 쓰이므로 답변을 붙잡아 둘 이유가 없다.
+                  (그래프 안에 있을 때는 매 턴 1~2회의 LLM 왕복이 답변을 지연시켰다)
+        """
+        await asyncio.to_thread(self._write_memory)
+
+    def _write_memory(self):
+        """
+        Des:
+            직전 턴의 라우팅 결과를 보고 개인정보/선호도를 저장하는 함수
+        """
+        state = self.graph.get_state(self.config).values
+        user_id = self.config["configurable"]["user_id"]
+        namespace = ("memories", user_id)
+
+        targets = []
+        if state.get("is_personal") == "YES":
+            targets.append(
+                ("personal_info", prompt_config.create_memory_prompt, "memory")
+            )
+        if state.get("is_preference") == "YES":
+            targets.append(
+                (
+                    "personal_preference",
+                    prompt_config.create_preference_prompt,
+                    "preference",
+                )
+            )
+
+        for key, template, field in targets:
+            existing = self._get_memory(namespace=namespace, key=key, store=self.store)
+            system_message = template.format(**{field: existing})
+            prompt = [SystemMessage(content=system_message)] + [
+                HumanMessage(content=self.previous_human_messages_query)
+            ]
+            result = self.llm.invoke(prompt).content
+            self.store.put(namespace=namespace, key=key, value={"memory": result})
+            self.user_data.update_user_info(user_id, key, result)
+
     def set_config(self, user_id: str):
         """
         Des:
@@ -74,7 +117,7 @@ class ChatbotAgent:
         builder.add_node("_node_decide_personal", self._node_decide_personal)
         builder.add_node("_node_decide_preference", self._node_decide_preference)
         builder.add_node("_node_decide_search", self._node_decide_search)
-        builder.add_node("_node_write_memory", self._node_write_memory)
+        builder.add_node("_node_search", self._node_search)
         builder.add_node("_node_answer", self._node_answer)
         builder.add_node("_node_optimize_memory", self._node_optimize_memory)
         builder.add_edge(START, "_node_initialize")
@@ -83,14 +126,15 @@ class ChatbotAgent:
         builder.add_edge("_node_initialize", "_node_decide_search")
         builder.add_edge(
             ["_node_decide_personal", "_node_decide_preference", "_node_decide_search"],
-            "_node_write_memory",
+            "_node_search",
         )
-        builder.add_edge("_node_write_memory", "_node_answer")
+        builder.add_edge("_node_search", "_node_answer")
         builder.add_edge("_node_answer", "_node_optimize_memory")
         builder.add_edge("_node_optimize_memory", END)
         ShortTermMemory = MemorySaver()
-        LongTermMemory = InMemoryStore()
-        self.graph = builder.compile(checkpointer=ShortTermMemory, store=LongTermMemory)
+        # 메모리 저장을 답변 이후로 미루므로 스토어를 그래프 밖에서도 쓴다.
+        self.store = InMemoryStore()
+        self.graph = builder.compile(checkpointer=ShortTermMemory, store=self.store)
         print(f"{GREEN}[agent.py] 그래프 빌드 완료{RESET}")
 
     def _node_initialize(self, state: State, config: RunnableConfig, store: BaseStore):
@@ -165,72 +209,53 @@ class ChatbotAgent:
     def _node_decide_search(self, state: State):
         """
         Des:
-            사용자 요청에 검색 여부를 결정하는 노드
+            검색 필요 여부와 검색어를 한 번에 결정하는 노드
+                - 예전에는 판단(YES/NO)과 검색어 생성을 각각 호출해 LLM 왕복이 2회였다.
+                  하나로 합쳐 왕복을 1회로 줄인다.
                 - 검색 API 키가 없으면 LLM 호출 없이 바로 NO 로 처리한다.
         """
         if not is_search_available():
-            return {"is_search": "NO"}
-        prompt = [SystemMessage(content=prompt_config.decide_search_prompt)] + [
+            return {"is_search": "NO", "search_keyword": ""}
+
+        system_message = prompt_config.decide_search_prompt.format(
+            today=datetime.now().strftime("%Y-%m-%d"),
+            previous_search_keyword=state.get("search_keyword") or "(없음)",
+        )
+        prompt = [SystemMessage(content=system_message)] + [
             HumanMessage(content=self.previous_human_messages_query)
         ]
-        return {"is_search": self._parse_yes_no(self.llm.invoke(prompt).content)}
+        content = (self.llm.invoke(prompt).content or "").strip()
 
-    def _node_write_memory(
-        self, state: State, config: RunnableConfig, store: BaseStore
-    ):
+        # 알파벳만 남겼을 때 NO 면 검색 불필요, 그 외에는 내용을 검색어로 본다.
+        if not content or re.sub(r"[^A-Z]", "", content.upper()) == "NO":
+            return {"is_search": "NO", "search_keyword": ""}
+        return {"is_search": "YES", "search_keyword": content.splitlines()[0].strip()}
+
+    def _node_search(self, state: State, config: RunnableConfig, store: BaseStore):
         """
         Des:
-            사용자 메시지를 인식하고, 개인정보/선호도/검색결과 등을 저장하는 노드
+            검색이 필요한 경우 웹 검색 결과를 스토어에 적재하는 노드
+                - 개인정보/선호도 저장은 답변 지연을 줄이기 위해 그래프 밖으로 뺐다.
+                  (update_memory 참고)
         """
+        if state.get("is_search") != "YES":
+            return
+
         user_id = config["configurable"]["user_id"]
         namespace = ("memories", user_id)
-        if state.get("is_personal") == "YES":
-            personal_memory = self._get_memory(
-                namespace=namespace, key="personal_info", store=store
+        main_context, suffix_context = self._web_search(state.get("search_keyword", ""))
+        if not main_context:
+            # 검색 결과가 없으면 검색 없이 답변하도록 되돌린다.
+            print(
+                f"{YELLOW}[agent.py] 검색 결과가 없어 일반 답변으로 전환합니다.{RESET}"
             )
-            system_message = prompt_config.create_memory_prompt.format(
-                memory=personal_memory
-            )
-            memory_prompt = [SystemMessage(content=system_message)] + [
-                HumanMessage(content=self.previous_human_messages_query)
-            ]
-            result = self.llm.invoke(memory_prompt).content
-            store.put(
-                namespace=namespace, key="personal_info", value={"memory": result}
-            )
-            self.user_data.update_user_info(user_id, "personal_info", result)
-        if state.get("is_preference") == "YES":
-            preference_memory = self._get_memory(
-                namespace=namespace, key="personal_preference", store=store
-            )
-            system_message = prompt_config.create_preference_prompt.format(
-                preference=preference_memory
-            )
-            preference_prompt = [SystemMessage(content=system_message)] + [
-                HumanMessage(content=self.previous_human_messages_query)
-            ]
-            result = self.llm.invoke(preference_prompt).content
-            store.put(
-                namespace=namespace, key="personal_preference", value={"memory": result}
-            )
-            self.user_data.update_user_info(user_id, "personal_preference", result)
-
-        if state.get("is_search") == "YES":
-            main_context, suffix_context = self._web_search()
-            if not main_context:
-                # 검색 결과가 없으면 검색 없이 답변하도록 되돌린다.
-                print(
-                    f"{YELLOW}[agent.py] 검색 결과가 없어 일반 답변으로 전환합니다.{RESET}"
-                )
-                return {"is_search": "NO"}
-            store.put(
-                namespace=namespace, key="main_context", value={"memory": main_context}
-            )
-            store.put(
-                namespace=namespace,
-                key="suffix_context",
-                value={"memory": suffix_context},
-            )
+            return {"is_search": "NO"}
+        store.put(
+            namespace=namespace, key="main_context", value={"memory": main_context}
+        )
+        store.put(
+            namespace=namespace, key="suffix_context", value={"memory": suffix_context}
+        )
 
     def _node_answer(self, state: State, config: RunnableConfig, store: BaseStore):
         """
@@ -296,25 +321,19 @@ class ChatbotAgent:
         else:
             return {"messages": state["messages"]}
 
-    def _web_search(self):
+    def _web_search(self, search_keyword: str):
         """
         Des:
             웹 검색 함수
-                - Tavily API 가 검색과 본문 추출을 함께 처리한다.
+                - 검색어는 라우팅 노드에서 이미 만들어 넘겨받는다. (LLM 왕복 절약)
                 - 검색 결과가 없으면 빈 컨텍스트를 반환하며, 호출측에서 검색 없이 답변한다.
+        Args:
+            search_keyword: 검색할 키워드
         """
-        prompt = prompt_config.generate_search_keyword.format(
-            query=self.previous_human_messages_query,
-            previous_search_keyword=self.search_keyword,
-            today=datetime.now().strftime("%Y-%m-%d"),
-        )
-        self.search_keyword = self.llm.invoke(prompt).content
         results = web_search(
-            self.search_keyword, SEARCH_RESULT_COUNT=self.SEARCH_RESULT_COUNT
+            search_keyword, SEARCH_RESULT_COUNT=self.SEARCH_RESULT_COUNT
         )
-        print(
-            f"{RED}검색어 : {self.search_keyword}\n검색결과 : {len(results)}\n{RESET}"
-        )
+        print(f"{RED}검색어 : {search_keyword}\n검색결과 : {len(results)}\n{RESET}")
         main_context = ""
         suffix_context = ""
         for idx, result in enumerate(results, start=1):

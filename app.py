@@ -82,6 +82,58 @@ def get_or_create_agent(user_id: str) -> ChatbotAgent:
 # 기본값은 루프백이라 외부로 나갔다 오지 않는다. (배포 환경에서도 그대로 두면 된다)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", f"http://127.0.0.1:{PORT}/webhook")
 
+# 카카오 simpleText 는 말풍선당 1,000자, 응답당 output 최대 3개.
+# 넘기면 잘리므로 문단/문장 경계에서 나눠 담는다.
+KAKAO_TEXT_LIMIT = 1000
+KAKAO_MAX_OUTPUTS = 3
+
+
+def build_kakao_outputs(text: str) -> list[dict]:
+    """
+    Des:
+        답변을 카카오 응답 형식(simpleText 목록)으로 변환하는 함수
+            - 말풍선당 1,000자, 최대 3개까지만 허용된다.
+            - 문단 -> 문장 순으로 경계를 찾아 나누고, 그래도 넘치면 잘라낸다.
+    Args:
+        text: 보낼 답변 전문
+    Returns:
+        list[dict]: simpleText output 목록 (1~3개)
+    """
+    chunks: list[str] = []
+    remaining = text.strip()
+
+    while remaining and len(chunks) < KAKAO_MAX_OUTPUTS:
+        if len(remaining) <= KAKAO_TEXT_LIMIT:
+            chunks.append(remaining)
+            remaining = ""
+            break
+
+        window = remaining[:KAKAO_TEXT_LIMIT]
+        # 문단 -> 문장 -> 공백 순으로 자연스러운 경계를 찾는다.
+        cut = max(window.rfind("\n\n"), window.rfind("\n"))
+        if cut < KAKAO_TEXT_LIMIT // 2:
+            cut = max(window.rfind(". "), window.rfind("다. "), window.rfind("요. "))
+            if cut != -1:
+                cut += 1
+        if cut < KAKAO_TEXT_LIMIT // 2:
+            cut = window.rfind(" ")
+        if cut <= 0:
+            cut = KAKAO_TEXT_LIMIT
+
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+
+    # 3개를 다 쓰고도 남으면 마지막 말풍선 끝을 줄임표로 대체한다.
+    if remaining and chunks:
+        tail = "\n\n(내용이 길어 일부만 표시했어요)"
+        last = chunks[-1]
+        if len(last) + len(tail) > KAKAO_TEXT_LIMIT:
+            last = last[: KAKAO_TEXT_LIMIT - len(tail)]
+        chunks[-1] = last + tail
+
+    return [{"simpleText": {"text": c}} for c in chunks if c]
+
+
 # 답변 생성이 실패했을 때 사용자에게 보낼 메시지
 FALLBACK_MESSAGE = (
     "죄송해요, 답변을 만드는 중에 문제가 생겼어요 😢\n잠시 후 다시 말씀해주시겠어요?"
@@ -98,8 +150,10 @@ async def get_answer(agent: ChatbotAgent, question: str, kakao_callback_url: str
         kakao_callback_url: 카카오 콜백 URL
     """
     START_TIME = time.time()
+    generated = False
     try:
         response = await _generate_response(agent, question, START_TIME)
+        generated = True
     except Exception as e:
         # 여기서 예외가 새어나가면 콜백이 전송되지 않아 사용자가 무한 대기하게 된다.
         print(f"{RED}[app.py] 답변 생성 중 에러 발생: {type(e).__name__}: {e}{RESET}")
@@ -109,6 +163,16 @@ async def get_answer(agent: ChatbotAgent, question: str, kakao_callback_url: str
         webhook_url=WEBHOOK_URL,
         response_data={"response": response, "kakao_callback_url": kakao_callback_url},
     )
+
+    # 개인정보/선호도 갱신은 다음 턴부터 쓰이므로 답변을 보낸 뒤에 처리한다.
+    if generated:
+        try:
+            await agent.update_memory()
+            print(
+                f"{GREEN}[app.py] 응답 후 메모리 갱신 완료 ({time.time() - START_TIME:.1f}초){RESET}"
+            )
+        except Exception as e:
+            print(f"{RED}[app.py] 메모리 갱신 실패: {type(e).__name__}: {e}{RESET}")
 
 
 async def _generate_response(agent: ChatbotAgent, question: str, START_TIME: float):
@@ -178,7 +242,7 @@ async def webhook_handler(request: Request):
                 json={
                     "version": "2.0",
                     "template": {
-                        "outputs": [{"simpleText": {"text": request_data["response"]}}]
+                        "outputs": build_kakao_outputs(request_data["response"])
                     },
                 },
             )
