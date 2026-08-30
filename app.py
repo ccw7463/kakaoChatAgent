@@ -151,9 +151,11 @@ def build_kakao_outputs(text: str) -> list[dict]:
     Des:
         답변을 카카오 응답 형식(simpleText 목록)으로 변환하는 함수
             - 말풍선당 1,000자, 최대 3개까지만 허용된다.
-            - 본문과 참고내용을 먼저 갈라서, 출처 목록이 여러 말풍선에
-              흩어지지 않게 한다. (예전에는 글자 수만 보고 잘라
-              참고내용 1,2 는 앞 말풍선, 3 만 뒤 말풍선으로 떨어졌다)
+            - 참고내용이 있으면 길이와 무관하게 항상 본문과 분리한다.
+              길이에 따라 붙었다 떨어졌다 하면 레이아웃이 매번 달라진다.
+            - 출처 목록은 블록 단위로만 나눠 여러 말풍선에 흩어지지 않게 한다.
+              (예전에는 글자 수만 보고 잘라 참고내용 1,2 는 앞 말풍선,
+               3 만 뒤 말풍선으로 떨어졌다)
     Args:
         text: 보낼 답변 전문
     Returns:
@@ -162,13 +164,16 @@ def build_kakao_outputs(text: str) -> list[dict]:
     text = text.strip()
     if not text:
         return []
-    if len(text) <= KAKAO_TEXT_LIMIT:
-        return [{"simpleText": {"text": text}}]
 
     marker_at = text.find(REFERENCE_MARKER)
     if marker_at == -1:
+        # 참고내용이 없으면 길 때만 나눈다.
+        if len(text) <= KAKAO_TEXT_LIMIT:
+            return [{"simpleText": {"text": text}}]
         body, refs = text, ""
     else:
+        # 참고내용은 길이와 무관하게 항상 별도 말풍선으로 보낸다.
+        # 길이에 따라 붙었다 떨어졌다 하면 사용자가 볼 때마다 레이아웃이 달라진다.
         body, refs = text[:marker_at].rstrip(), text[marker_at:].strip()
 
     # 참고내용 몫을 먼저 확보한다. 본문이 길다고 출처가 통째로 사라지면 곤란하다.
