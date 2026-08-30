@@ -38,8 +38,6 @@ Langgraph 기반으로 카카오톡 챗봇을 구현해보았습니다.
 - 대화 이력이 프로세스 메모리(`MemorySaver`)에 저장되어 서버 재시작 시 초기화됨
   (사용자 개인정보/선호도는 Supabase 에 저장되어 복구됨)
 
-- `user_agents` 딕셔너리가 계속 누적되어 장기 운영 시 메모리 증가
-
 - 의존성이 langchain 0.3 / langgraph 0.2 세대에 고정되어 있어 현행화 필요
 
 - 대화 이력을 Postgres 체크포인터로 옮기면 재시작에도 멀티턴이 유지됨
@@ -99,6 +97,7 @@ _의존성 관리는 `uv` 를 사용합니다._
     | `WEBHOOK_URL` | — | 비워두면 루프백을 사용합니다. 보통 손댈 필요 없습니다. |
     | `DB_SCHEMA` | — | 테이블을 격리할 스키마. 기본값 `kakao_agent`. |
     | `LLM_MODEL` | — | OpenRouter 모델 슬러그. 기본값 `google/gemini-3-flash-preview`. |
+    | `MAX_AGENTS` | — | 메모리에 유지할 에이전트 수 상한(LRU). 기본값 500. |
     | `PORT` | — | 배포 플랫폼이 자동 주입합니다. 로컬 기본값 7860. |
 
 4. 실행

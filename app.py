@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 from modules.agent import ChatbotAgent
@@ -41,7 +42,41 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-user_agents = {}
+
+# 사용자별 에이전트 캐시.
+# 에이전트마다 컴파일된 그래프와 체크포인터를 들고 있어 무한정 쌓이면 메모리가 샌다.
+# LRU 로 상한을 두고, 오래 쓰이지 않은 것부터 정리한다.
+# 정리되어도 개인정보/선호도는 Supabase 에서 다시 불러오므로 손실은 대화 맥락뿐이다.
+MAX_AGENTS = int(os.getenv("MAX_AGENTS", "500"))
+user_agents: "OrderedDict[str, ChatbotAgent]" = OrderedDict()
+
+
+def get_or_create_agent(user_id: str) -> ChatbotAgent:
+    """
+    Des:
+        사용자별 에이전트를 가져오거나 생성하는 함수 (LRU)
+    Args:
+        user_id: 사용자 ID
+    Returns:
+        ChatbotAgent: 해당 사용자의 에이전트
+    """
+    agent = user_agents.get(user_id)
+    if agent is None:
+        agent = ChatbotAgent()
+        print(
+            f"{GREEN}[app.py] 새로운 사용자 에이전트를 생성했습니다. 사용자 id : {user_id}{RESET}"
+        )
+    user_agents[user_id] = agent
+    user_agents.move_to_end(user_id)
+
+    while len(user_agents) > MAX_AGENTS:
+        evicted, _ = user_agents.popitem(last=False)
+        print(
+            f"{YELLOW}[app.py] 오래된 에이전트를 정리했습니다. 사용자 id : {evicted}{RESET}"
+        )
+
+    return agent
+
 
 # 서버가 스스로를 호출하는 웹훅 주소.
 # 기본값은 루프백이라 외부로 나갔다 오지 않는다. (배포 환경에서도 그대로 두면 된다)
@@ -194,13 +229,7 @@ async def handle_question(request: Request, background_tasks: BackgroundTasks):
         )
 
     # 사용자별로 개별적으로 에이전트 할당
-    if user_id not in user_agents:
-        user_agents[user_id] = ChatbotAgent()
-        print(
-            f"{GREEN}[app.py] 새로운 사용자 에이전트를 생성했습니다. 사용자 id : {user_id}{RESET}"
-        )
-
-    agent = user_agents[user_id]
+    agent = get_or_create_agent(user_id)
     agent.set_config(user_id=user_id)
     background_tasks.add_task(
         get_answer,
