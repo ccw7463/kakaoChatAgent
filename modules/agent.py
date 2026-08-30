@@ -4,12 +4,22 @@ import re
 from datetime import datetime
 
 from . import *
-from utils.util import web_search, is_search_available
+from utils.util import web_search, is_search_available, embed_texts
 from modules.db import UserData
 
 # OpenRouter 는 OpenAI 호환 API 이므로 ChatOpenAI 에 base_url 만 바꿔 끼우면 된다.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 LLM_MODEL = os.getenv("LLM_MODEL", "google/gemini-3-flash-preview")
+
+# 과거 대화 회상 설정.
+# 한국어 임베딩은 무관한 문장끼리도 유사도가 0.6 근처까지 나온다.
+# 실측상 관련 대화는 0.76 이상, 무관한 대화는 0.66 이하로 갈려서 그 사이를 임계값으로 둔다.
+RECALL_LIMIT = int(os.getenv("RECALL_LIMIT", "3"))
+RECALL_MIN_SIMILARITY = float(os.getenv("RECALL_MIN_SIMILARITY", "0.66"))
+# "고마워", "잘가" 같은 인사말은 회상해봐야 쓸모가 없는데,
+# 같은 인사말끼리는 유사도가 0.8 을 넘어 정작 유용한 회상(0.7 근처)을 밀어낸다.
+# 이런 짧은 발화는 아예 저장하지 않는다.
+RECALL_MIN_QUESTION_CHARS = int(os.getenv("RECALL_MIN_QUESTION_CHARS", "6"))
 
 
 class State(MessagesState):
@@ -17,6 +27,7 @@ class State(MessagesState):
     is_personal: str
     is_preference: str
     search_keyword: str
+    recalled: str
 
 
 class ChatbotAgent:
@@ -63,11 +74,14 @@ class ChatbotAgent:
     def _write_memory(self):
         """
         Des:
-            직전 턴의 라우팅 결과를 보고 개인정보/선호도를 저장하는 함수
+            직전 턴의 라우팅 결과를 보고 개인정보/선호도를 저장하고,
+            대화 내용을 회상용으로 적재하는 함수
         """
         state = self.graph.get_state(self.config).values
         user_id = self.config["configurable"]["user_id"]
         namespace = ("memories", user_id)
+
+        self._save_conversation(state, user_id)
 
         targets = []
         if state.get("is_personal") == "YES":
@@ -117,6 +131,7 @@ class ChatbotAgent:
         builder.add_node("_node_decide_personal", self._node_decide_personal)
         builder.add_node("_node_decide_preference", self._node_decide_preference)
         builder.add_node("_node_decide_search", self._node_decide_search)
+        builder.add_node("_node_recall", self._node_recall)
         builder.add_node("_node_search", self._node_search)
         builder.add_node("_node_answer", self._node_answer)
         builder.add_node("_node_optimize_memory", self._node_optimize_memory)
@@ -124,8 +139,14 @@ class ChatbotAgent:
         builder.add_edge("_node_initialize", "_node_decide_personal")
         builder.add_edge("_node_initialize", "_node_decide_preference")
         builder.add_edge("_node_initialize", "_node_decide_search")
+        builder.add_edge("_node_initialize", "_node_recall")
         builder.add_edge(
-            ["_node_decide_personal", "_node_decide_preference", "_node_decide_search"],
+            [
+                "_node_decide_personal",
+                "_node_decide_preference",
+                "_node_decide_search",
+                "_node_recall",
+            ],
             "_node_search",
         )
         builder.add_edge("_node_search", "_node_answer")
@@ -231,6 +252,40 @@ class ChatbotAgent:
             return {"is_search": "NO", "search_keyword": ""}
         return {"is_search": "YES", "search_keyword": content.splitlines()[0].strip()}
 
+    def _node_recall(self, state: State, config: RunnableConfig):
+        """
+        Des:
+            현재 질문과 의미가 비슷한 과거 대화를 찾아오는 노드
+                - 라우팅 노드들과 병렬로 실행되어 추가 지연이 사실상 없다.
+                - 대화창에 아직 남아있는 내용은 중복이므로 제외한다.
+                - 임베딩이나 조회가 실패해도 회상만 비우고 답변은 계속 진행한다.
+        """
+        user_id = config["configurable"]["user_id"]
+        question = state["messages"][-1].content
+
+        vectors = embed_texts([question])
+        if not vectors:
+            return {"recalled": ""}
+
+        try:
+            hits = self.user_data.search_conversations(
+                user_id,
+                vectors[0],
+                limit=RECALL_LIMIT,
+                min_similarity=RECALL_MIN_SIMILARITY,
+            )
+        except Exception as e:
+            print(f"{RED}[agent.py] 대화 회상 실패: {type(e).__name__}: {e}{RESET}")
+            return {"recalled": ""}
+
+        in_window = {
+            m.content for m in state["messages"] if isinstance(m, HumanMessage)
+        }
+        lines = [f"- 질문: {q}\n  답변: {a}" for q, a, _ in hits if q not in in_window]
+        if lines:
+            print(f"{YELLOW}[agent.py] 과거 대화 {len(lines)}건을 회상했습니다.{RESET}")
+        return {"recalled": "\n".join(lines)}
+
     def _node_search(self, state: State, config: RunnableConfig, store: BaseStore):
         """
         Des:
@@ -271,6 +326,11 @@ class ChatbotAgent:
             namespace=namespace, key="personal_preference", store=store
         )
 
+        recalled = state.get("recalled") or ""
+        recalled_block = (
+            prompt_config.recalled_prompt.format(recalled=recalled) if recalled else ""
+        )
+
         if state.get("is_search") == "YES":
             main_context = self._get_memory(
                 namespace=namespace, key="main_context", store=store
@@ -279,7 +339,9 @@ class ChatbotAgent:
                 namespace=namespace, key="suffix_context", store=store
             )
             system_message = prompt_config.answer_prompt.format(
-                memory=personal_memory, preference=personal_preference
+                memory=personal_memory,
+                preference=personal_preference,
+                recalled=recalled_block,
             )
             user_prompt = prompt_config.answer_with_context.format(
                 context=main_context, query=state["messages"][-1].content
@@ -298,7 +360,9 @@ class ChatbotAgent:
             }
         else:
             system_message = prompt_config.answer_prompt.format(
-                memory=personal_memory, preference=personal_preference
+                memory=personal_memory,
+                preference=personal_preference,
+                recalled=recalled_block,
             )
             prompt = [
                 SystemMessage(content=self.system_prompt + system_message)
@@ -348,6 +412,35 @@ class ChatbotAgent:
 링크 : {link}
 """
         return main_context, suffix_context
+
+    def _save_conversation(self, state: dict, user_id: str):
+        """
+        Des:
+            직전 턴의 질문/답변을 임베딩과 함께 저장하는 함수
+                - 나중에 대화창에서 밀려나도 회상으로 다시 찾아올 수 있게 한다.
+                - 실패해도 답변은 이미 전송된 뒤이므로 로그만 남기고 넘어간다.
+        """
+        messages = state.get("messages") or []
+        question = next(
+            (m.content for m in reversed(messages) if isinstance(m, HumanMessage)), None
+        )
+        answer = next(
+            (m.content for m in reversed(messages) if isinstance(m, AIMessage)), None
+        )
+        if not question or not answer:
+            return
+
+        # 인사말 등 짧은 발화는 회상 대상에서 제외한다.
+        if len(question.strip()) < RECALL_MIN_QUESTION_CHARS:
+            return
+
+        try:
+            vectors = embed_texts([f"{question}\n{answer}"])
+            if not vectors:
+                return
+            self.user_data.save_conversation(user_id, question, answer, vectors[0])
+        except Exception as e:
+            print(f"{RED}[agent.py] 대화 저장 실패: {type(e).__name__}: {e}{RESET}")
 
     @staticmethod
     def _parse_yes_no(content: str) -> str:

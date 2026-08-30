@@ -11,6 +11,8 @@ class UserData:
     """
 
     _pool = None
+    # pgvector 를 못 쓰는 환경에서는 회상 기능만 끄고 나머지는 정상 동작시킨다.
+    recall_enabled = True
 
     def __init__(self):
         schema = os.getenv("DB_SCHEMA", "kakao_agent")
@@ -22,6 +24,7 @@ class UserData:
             )
         self.schema = schema
         self.table = f"{schema}.users"
+        self.conv_table = f"{schema}.conversations"
         self._initialize_db()
 
     @classmethod
@@ -94,6 +97,65 @@ class UserData:
         with self.get_pool().connection() as conn:
             conn.execute("SELECT 1")
 
+    def save_conversation(
+        self, user_id: str, question: str, answer: str, embedding: list[float]
+    ):
+        """
+        Des:
+            대화 한 턴을 임베딩과 함께 저장하는 함수
+        Args:
+            user_id: 사용자 ID
+            question: 사용자 질문
+            answer: 봇 답변
+            embedding: 질문+답변의 임베딩 벡터
+        """
+        if not self.recall_enabled:
+            return
+        with self.get_pool().connection() as conn:
+            conn.execute(
+                f"INSERT INTO {self.conv_table} (user_id, question, answer, embedding) "
+                f"VALUES (%s, %s, %s, %s)",
+                (user_id, question, answer, str(embedding)),
+            )
+
+    def search_conversations(
+        self,
+        user_id: str,
+        embedding: list[float],
+        limit: int = 3,
+        min_similarity: float = 0.6,
+    ) -> list[tuple]:
+        """
+        Des:
+            현재 질문과 의미가 비슷한 과거 대화를 찾는 함수
+                - 코사인 거리 기준이며, 본인 대화만 대상으로 한다.
+        Args:
+            user_id: 사용자 ID
+            embedding: 현재 질문의 임베딩 벡터
+            limit: 최대 반환 개수
+            min_similarity: 이 값보다 유사도가 낮으면 버린다 (잡음 주입 방지)
+        Returns:
+            list[tuple]: (question, answer, similarity) 목록
+        """
+        if not self.recall_enabled:
+            return []
+        with self.get_pool().connection() as conn:
+            return conn.execute(
+                f"SELECT question, answer, 1 - (embedding <=> %s::halfvec) AS similarity "
+                f"FROM {self.conv_table} "
+                f"WHERE user_id = %s AND 1 - (embedding <=> %s::halfvec) >= %s "
+                f"ORDER BY embedding <=> %s::halfvec "
+                f"LIMIT %s",
+                (
+                    str(embedding),
+                    user_id,
+                    str(embedding),
+                    min_similarity,
+                    str(embedding),
+                    limit,
+                ),
+            ).fetchall()
+
     def _initialize_db(self):
         with self.get_pool().connection() as conn:
             conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
@@ -105,6 +167,45 @@ class UserData:
                     personal_preference TEXT
                 )
                 """
+            )
+        self._initialize_conversations()
+
+    def _initialize_conversations(self):
+        """
+        Des:
+            과거 대화 회상용 테이블을 준비하는 함수
+                - pgvector 의 vector 타입은 인덱스 차원 상한이 2000 이라
+                  3072 차원을 색인하려면 halfvec 을 써야 한다. (pgvector 0.7+)
+                - pgvector 가 없는 환경에서는 회상만 끄고 나머지는 정상 동작시킨다.
+        """
+        try:
+            with self.get_pool().connection() as conn:
+                conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                conn.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {self.conv_table} (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        embedding halfvec({EMBED_DIM}) NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS conversations_embedding_idx "
+                    f"ON {self.conv_table} USING hnsw (embedding halfvec_cosine_ops)"
+                )
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS conversations_user_created_idx "
+                    f"ON {self.conv_table} (user_id, created_at DESC)"
+                )
+        except Exception as e:
+            UserData.recall_enabled = False
+            print(
+                f"{YELLOW}[db.py] pgvector 를 사용할 수 없어 과거 대화 회상을 비활성화합니다: "
+                f"{type(e).__name__}{RESET}"
             )
 
     def _get_or_create_user(self, user_id: str):

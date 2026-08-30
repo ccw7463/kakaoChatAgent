@@ -13,6 +13,7 @@ from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 from configs.config import prompt_config
 from utils.util import *
+from utils.util import EMBED_DIM
 
 set_env()
 
